@@ -5,6 +5,12 @@
 # Supports cross-compilation: runs on any host but can produce a binary
 # for any supported target by passing a TARGET_CLASSIFIER.
 #
+# Compression support:
+#   Native builds (CLASSIFIER == host) on macOS: snappy, lz4, and zstd are
+#   detected from the homebrew prefix and statically linked into librocksdb.dylib
+#   so the resulting JAR is self-contained (no homebrew runtime dependency).
+#   Cross-compiled builds: compression disabled (no cross-sysroot available).
+#
 # Usage:
 #   ./scripts/build-rocksdb.sh <output-resources-dir> <target-classifier>
 #
@@ -82,17 +88,48 @@ if [ "$CLASSIFIER" != "$HOST_CLASSIFIER" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Compression codec setup
+#
+# Native macOS builds: inject the homebrew include path into CC/CXX so that
+# build_detect_platform's header probes succeed, then pre-generate
+# make_config.mk and patch -l<lib> references to the static .a paths.
+# Cross-compiled builds: keep compression disabled (no sysroot for target).
+# ---------------------------------------------------------------------------
+PATCH_COMPRESSION=0
+HOMEBREW_PREFIX=""
+
+if [ "$CLASSIFIER" = "$HOST_CLASSIFIER" ] && [ "$TARGET_OS" = "Darwin" ]; then
+    HOMEBREW_PREFIX="$(brew --prefix 2>/dev/null || echo /opt/homebrew)"
+    if [ -d "${HOMEBREW_PREFIX}/include" ]; then
+        PATCH_COMPRESSION=1
+        echo "[build-rocksdb] Native macOS build — will statically link snappy/lz4/zstd from $HOMEBREW_PREFIX"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
 # Build
 # ---------------------------------------------------------------------------
 echo "[build-rocksdb] Building RocksDB $CLASSIFIER$CROSS with zig cc/c++ (jobs=$JOBS)..."
 
-export CC="zig cc -target $ZIG_TARGET"
-export CXX="zig c++ -target $ZIG_TARGET"
+if [ "$PATCH_COMPRESSION" = "1" ]; then
+    # Bake homebrew include path into the compiler so build_detect_platform's
+    # header probes succeed. The matching -L path is passed via EXTRA_LDFLAGS
+    # so zig can resolve -lsnappy/-llz4/-lzstd/-lgflags at link time.
+    export CC="zig cc -target $ZIG_TARGET -I${HOMEBREW_PREFIX}/include"
+    export CXX="zig c++ -target $ZIG_TARGET -I${HOMEBREW_PREFIX}/include"
+    COMPRESSION_LDFLAGS="-L${HOMEBREW_PREFIX}/lib"
+else
+    export CC="zig cc -target $ZIG_TARGET"
+    export CXX="zig c++ -target $ZIG_TARGET"
+    export ROCKSDB_DISABLE_SNAPPY=1
+    COMPRESSION_LDFLAGS=""
+fi
+
 export PORTABLE=1
-# TODO: to have hermetic zig build, disable external libs for now
-export ROCKSDB_DISABLE_SNAPPY=1
 export ROCKSDB_DISABLE_BZ2=1
 export ROCKSDB_DISABLE_ZLIB=1
+# gflags is not needed in the shared lib; skip it to avoid an extra runtime dep.
+export ROCKSDB_DISABLE_GFLAGS=1
 export TARGET_OS=$TARGET_OS
 cd "$ROCKSDB_DIR"
 
@@ -107,7 +144,12 @@ EXTRA_FLAGS="-Wno-error"
 rm -f make_config.mk
 make clean -j"$JOBS" 2>/dev/null || true
 
-make shared_lib EXTRA_LDFLAGS="-s" EXTRA_CXXFLAGS="$EXTRA_FLAGS" EXTRA_CFLAGS="$EXTRA_FLAGS" -j"$JOBS"
+make shared_lib \
+    DEBUG_LEVEL=0 \
+    EXTRA_LDFLAGS="-s ${COMPRESSION_LDFLAGS}" \
+    EXTRA_CXXFLAGS="$EXTRA_FLAGS" \
+    EXTRA_CFLAGS="$EXTRA_FLAGS" \
+    -j"$JOBS"
 
 # ---------------------------------------------------------------------------
 # Install
