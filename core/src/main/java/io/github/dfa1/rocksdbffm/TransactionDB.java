@@ -6,6 +6,7 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
 import java.util.Optional;
+import java.util.function.Function;
 import java.util.OptionalLong;
 
 /// FFM wrapper for `rocksdb_transactiondb_t` — a RocksDB database with pessimistic
@@ -593,6 +594,42 @@ public final class TransactionDB extends NativeObject {
 			byte[] result = valPtr.reinterpret(valLen).toArray(ValueLayout.JAVA_BYTE);
 			MH_PINNABLESLICE_DESTROY.invokeExact(pin);
 			return result;
+		} catch (Throwable t) {
+			throw RocksDBException.wrap("get failed", t);
+		}
+	}
+
+	/// Scoped get from `cf` via PinnableSlice — invokes `reader` with a live view of the value bytes.
+	///
+	/// The [MemorySegment] passed to `reader` is valid only for the duration of the call; callers
+	/// must not retain it past the function's return. The PinnableSlice is destroyed in a
+	/// `finally` block, so `reader` is guaranteed not to observe a dangling reference.
+	///
+	/// @param <T>         the type produced by `reader`
+	/// @param cf          target column family
+	/// @param readOptions read options (e.g. snapshot)
+	/// @param key         the key to look up
+	/// @param reader      function applied to the raw value segment
+	/// @return the result of `reader`, or [Optional#empty()] if the key does not exist
+	public <T> Optional<T> withPinnedValue(ColumnFamilyHandle cf, ReadOptions readOptions,
+	                                       byte[] key, Function<MemorySegment, T> reader) {
+		try (Arena arena = Arena.ofConfined()) {
+			MemorySegment err = RocksDB.errHolder(arena);
+			MemorySegment pin = (MemorySegment) MH_GET_PINNED_CF.invokeExact(
+					ptr(), readOptions.ptr(), cf.ptr(),
+					RocksDB.toNative(arena, key), (long) key.length, err);
+			RocksDB.checkError(err);
+			if (MemorySegment.NULL.equals(pin)) {
+				return Optional.empty();
+			}
+			MemorySegment valLenSeg = arena.allocate(ValueLayout.JAVA_LONG);
+			MemorySegment valPtr = (MemorySegment) MH_PINNABLESLICE_VALUE.invokeExact(pin, valLenSeg);
+			long valLen = valLenSeg.get(ValueLayout.JAVA_LONG, 0);
+			try {
+				return Optional.ofNullable(reader.apply(valPtr.reinterpret(valLen)));
+			} finally {
+				MH_PINNABLESLICE_DESTROY.invokeExact(pin);
+			}
 		} catch (Throwable t) {
 			throw RocksDBException.wrap("get failed", t);
 		}

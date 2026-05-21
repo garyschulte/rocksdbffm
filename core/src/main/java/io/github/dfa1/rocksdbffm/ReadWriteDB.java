@@ -6,6 +6,7 @@ import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.Function;
 import java.util.OptionalLong;
 import java.util.Set;
 
@@ -592,6 +593,23 @@ public final class ReadWriteDB extends NativeObject {
 	/// @return value bytes, or `null` if not found
 	public byte[] get(ColumnFamilyHandle cf, ReadOptions readOptions, byte[] key) {
 		return RocksDB.getCfBytes(ptr(), readOptions.ptr(), cf, key);
+	}
+
+	/// Scoped get from `cf` via PinnableSlice — invokes `reader` with a live view of the value bytes.
+	///
+	/// The [MemorySegment] passed to `reader` is valid only for the duration of the call; callers
+	/// must not retain it past the function's return. The PinnableSlice is destroyed in a
+	/// `finally` block, so `reader` is guaranteed not to observe a dangling reference.
+	///
+	/// @param <T>         the type produced by `reader`
+	/// @param cf          target column family
+	/// @param readOptions read options (e.g. snapshot)
+	/// @param key         the key to look up
+	/// @param reader      function applied to the raw value segment
+	/// @return the result of `reader`, or [Optional#empty()] if the key does not exist
+	public <T> Optional<T> withPinnedValue(ColumnFamilyHandle cf, ReadOptions readOptions,
+	                                       byte[] key, Function<MemorySegment, T> reader) {
+		return Optional.ofNullable(RocksDB.withPinnedCf(ptr(), readOptions.ptr(), cf, key, reader));
 	}
 
 	/// Single-copy get from `cf` via PinnableSlice into a direct [ByteBuffer].

@@ -13,6 +13,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.function.Function;
 
 /// Entry point for opening RocksDB databases.
 ///
@@ -1476,6 +1477,32 @@ public final class RocksDB {
 			value.copyFrom(valPtr.reinterpret(toCopy));
 			MH_PINNABLESLICE_DESTROY.invokeExact(pin);
 			return valLen;
+		} catch (Throwable t) {
+			throw RocksDBException.wrap("get failed", t);
+		}
+	}
+
+	/// Scoped get with column family via PinnableSlice — invokes `reader` with a live view of the value.
+	/// The [MemorySegment] passed to `reader` is valid only for the duration of the call;
+	/// callers must not retain it. Returns `null` if the key does not exist.
+	static <T> T withPinnedCf(MemorySegment db, MemorySegment readOpts, ColumnFamilyHandle cf,
+	                          byte[] key, Function<MemorySegment, T> reader) {
+		try (Arena arena = Arena.ofConfined()) {
+			MemorySegment err = errHolder(arena);
+			MemorySegment pin = (MemorySegment) MH_GET_PINNED_CF.invokeExact(
+					db, readOpts, cf.ptr(), toNative(arena, key), (long) key.length, err);
+			checkError(err);
+			if (MemorySegment.NULL.equals(pin)) {
+				return null;
+			}
+			MemorySegment valLenSeg = arena.allocate(ValueLayout.JAVA_LONG);
+			MemorySegment valPtr = (MemorySegment) MH_PINNABLESLICE_VALUE.invokeExact(pin, valLenSeg);
+			long valLen = valLenSeg.get(ValueLayout.JAVA_LONG, 0);
+			try {
+				return reader.apply(valPtr.reinterpret(valLen));
+			} finally {
+				MH_PINNABLESLICE_DESTROY.invokeExact(pin);
+			}
 		} catch (Throwable t) {
 			throw RocksDBException.wrap("get failed", t);
 		}
