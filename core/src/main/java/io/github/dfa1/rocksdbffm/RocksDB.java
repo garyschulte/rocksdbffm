@@ -34,6 +34,37 @@ import java.util.function.Function;
 public final class RocksDB {
 
 	// -----------------------------------------------------------------------
+	// Per-thread call slab — eliminates per-call Arena allocation on hot paths
+	// -----------------------------------------------------------------------
+
+	/// Maximum key size that fits in the inline slab key buffer.
+	/// 32-byte Bonsai trie keys fit with room to spare; oversized keys fall back to a one-shot alloc.
+	private static final int SLAB_MAX_KEY = 128;
+
+	/// Pre-allocated segments shared within a single thread across calls.
+	/// errHolder is zeroed before each use; the C API writes at most one pointer into it.
+	/// valLenHolder is overwritten by every successful get.
+	private static final class ThreadSlab {
+		/// 8-byte native segment reused as the `char** errptr` argument on every call.
+		final MemorySegment errHolder;
+		/// 8-byte native segment reused to receive `size_t* vlen` from pinnableslice_value.
+		final MemorySegment valLenHolder;
+		/// Fixed-size native buffer for inline key copies (avoids per-call native alloc for small keys).
+		final MemorySegment keyBuffer;
+
+		ThreadSlab() {
+			// Arena.ofAuto() is GC-managed; lives as long as this slab object does (i.e. thread lifetime).
+			Arena arena = Arena.ofAuto();
+			errHolder = arena.allocate(ValueLayout.ADDRESS);
+			errHolder.set(ValueLayout.ADDRESS, 0, MemorySegment.NULL);
+			valLenHolder = arena.allocate(ValueLayout.JAVA_LONG);
+			keyBuffer = arena.allocate(SLAB_MAX_KEY);
+		}
+	}
+
+	private static final ThreadLocal<ThreadSlab> CALL_SLAB = ThreadLocal.withInitial(ThreadSlab::new);
+
+	// -----------------------------------------------------------------------
 	// Open handles — used only inside factory methods
 	// -----------------------------------------------------------------------
 
@@ -1415,19 +1446,21 @@ public final class RocksDB {
 	}
 
 	/// byte[] get with explicit column family via PinnableSlice. Returns `null` if not found.
+	/// Uses a thread-local slab to avoid per-call Arena allocation on the hot path.
 	static byte[] getCfBytes(MemorySegment db, MemorySegment readOpts, ColumnFamilyHandle cf,
 	                         byte[] key) {
-		try (Arena arena = Arena.ofConfined()) {
-			MemorySegment err = errHolder(arena);
+		try {
+			final MemorySegment k = nativeKey(key);
+			final ThreadSlab slab = CALL_SLAB.get();
+			slab.errHolder.set(ValueLayout.ADDRESS, 0, MemorySegment.NULL);
 			MemorySegment pin = (MemorySegment) MH_GET_PINNED_CF.invokeExact(
-					db, readOpts, cf.ptr(), toNative(arena, key), (long) key.length, err);
-			checkError(err);
+					db, readOpts, cf.ptr(), k, (long) key.length, slab.errHolder);
+			checkError(slab.errHolder);
 			if (MemorySegment.NULL.equals(pin)) {
 				return null;
 			}
-			MemorySegment valLenSeg = arena.allocate(ValueLayout.JAVA_LONG);
-			MemorySegment valPtr = (MemorySegment) MH_PINNABLESLICE_VALUE.invokeExact(pin, valLenSeg);
-			long valLen = valLenSeg.get(ValueLayout.JAVA_LONG, 0);
+			MemorySegment valPtr = (MemorySegment) MH_PINNABLESLICE_VALUE.invokeExact(pin, slab.valLenHolder);
+			long valLen = slab.valLenHolder.get(ValueLayout.JAVA_LONG, 0);
 			byte[] result = valPtr.reinterpret(valLen).toArray(ValueLayout.JAVA_BYTE);
 			MH_PINNABLESLICE_DESTROY.invokeExact(pin);
 			return result;
@@ -1485,19 +1518,21 @@ public final class RocksDB {
 	/// Scoped get with column family via PinnableSlice — invokes `reader` with a live view of the value.
 	/// The [MemorySegment] passed to `reader` is valid only for the duration of the call;
 	/// callers must not retain it. Returns `null` if the key does not exist.
+	/// Uses a thread-local slab to avoid per-call Arena allocation on the hot path.
 	static <T> T withPinnedCf(MemorySegment db, MemorySegment readOpts, ColumnFamilyHandle cf,
 	                          byte[] key, Function<MemorySegment, T> reader) {
-		try (Arena arena = Arena.ofConfined()) {
-			MemorySegment err = errHolder(arena);
+		try {
+			final MemorySegment k = nativeKey(key);
+			final ThreadSlab slab = CALL_SLAB.get();
+			slab.errHolder.set(ValueLayout.ADDRESS, 0, MemorySegment.NULL);
 			MemorySegment pin = (MemorySegment) MH_GET_PINNED_CF.invokeExact(
-					db, readOpts, cf.ptr(), toNative(arena, key), (long) key.length, err);
-			checkError(err);
+					db, readOpts, cf.ptr(), k, (long) key.length, slab.errHolder);
+			checkError(slab.errHolder);
 			if (MemorySegment.NULL.equals(pin)) {
 				return null;
 			}
-			MemorySegment valLenSeg = arena.allocate(ValueLayout.JAVA_LONG);
-			MemorySegment valPtr = (MemorySegment) MH_PINNABLESLICE_VALUE.invokeExact(pin, valLenSeg);
-			long valLen = valLenSeg.get(ValueLayout.JAVA_LONG, 0);
+			MemorySegment valPtr = (MemorySegment) MH_PINNABLESLICE_VALUE.invokeExact(pin, slab.valLenHolder);
+			long valLen = slab.valLenHolder.get(ValueLayout.JAVA_LONG, 0);
 			try {
 				return reader.apply(valPtr.reinterpret(valLen));
 			} finally {
@@ -1647,6 +1682,22 @@ public final class RocksDB {
 		MemorySegment holder = arena.allocate(ValueLayout.ADDRESS);
 		holder.set(ValueLayout.ADDRESS, 0, MemorySegment.NULL);
 		return holder;
+	}
+
+	/// Copies `key` into the thread-local slab key buffer if it fits; otherwise allocates a one-shot
+	/// native segment via a GC-managed arena. The returned segment is valid for the duration of the
+	/// current call frame — callers must not retain it past the next RocksDB operation on this thread.
+	///
+	/// @param key source key bytes
+	/// @return native segment containing a copy of `key`
+	private static MemorySegment nativeKey(byte[] key) {
+		if (key.length <= SLAB_MAX_KEY) {
+			MemorySegment buf = CALL_SLAB.get().keyBuffer;
+			MemorySegment.copy(key, 0, buf, ValueLayout.JAVA_BYTE, 0, key.length);
+			return buf;
+		}
+		// Oversized key: fall back to a one-shot GC-managed alloc (rare in practice).
+		return toNative(Arena.ofAuto(), key);
 	}
 
 	/// Copies `bytes` into a new native memory segment allocated from `arena`.
