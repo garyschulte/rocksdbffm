@@ -99,6 +99,8 @@ public final class Options extends NativeObject {
 	private static final MethodHandle MH_SET_MAX_OPEN_FILES;
 	/// `void rocksdb_options_set_max_total_wal_size(rocksdb_options_t* opt, uint64_t n);`
 	private static final MethodHandle MH_SET_MAX_TOTAL_WAL_SIZE;
+	/// `void rocksdb_options_set_level_compaction_dynamic_level_bytes(rocksdb_options_t*, unsigned char);`
+	private static final MethodHandle MH_SET_LEVEL_COMPACTION_DYNAMIC_LEVEL_BYTES;
 	/// `void rocksdb_options_set_ratelimiter(rocksdb_options_t* opt, rocksdb_ratelimiter_t* limiter);`
 	private static final MethodHandle MH_SET_RATELIMITER;
 	/// `void rocksdb_options_set_env(rocksdb_options_t*, rocksdb_env_t*);`
@@ -230,6 +232,10 @@ public final class Options extends NativeObject {
 		MH_SET_MAX_TOTAL_WAL_SIZE = NativeLibrary.lookup("rocksdb_options_set_max_total_wal_size",
 				FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.JAVA_LONG));
 
+		MH_SET_LEVEL_COMPACTION_DYNAMIC_LEVEL_BYTES = NativeLibrary.lookup(
+				"rocksdb_options_set_level_compaction_dynamic_level_bytes",
+				FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.JAVA_BYTE));
+
 		MH_SET_RATELIMITER = NativeLibrary.lookup("rocksdb_options_set_ratelimiter",
 				FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
 
@@ -319,6 +325,23 @@ public final class Options extends NativeObject {
 			MH_SET_MAX_TOTAL_WAL_SIZE.invokeExact(ptr(), size);
 		} catch (Throwable t) {
 			throw new RocksDBException("setMaxTotalWalSize failed", t);
+		}
+		return this;
+	}
+
+	/// Enables RocksDB's dynamic level-size compaction strategy.
+	///
+	/// When true, RocksDB sizes each level dynamically so that the last level always contains
+	/// the majority of data. This reduces write amplification and keeps the total number of
+	/// live levels small. Strongly recommended for production workloads.
+	///
+	/// @param value `true` to enable dynamic level bytes
+	/// @return `this` for chaining
+	public Options setLevelCompactionDynamicLevelBytes(boolean value) {
+		try {
+			MH_SET_LEVEL_COMPACTION_DYNAMIC_LEVEL_BYTES.invokeExact(ptr(), value ? (byte) 1 : (byte) 0);
+		} catch (Throwable t) {
+			throw new RocksDBException("setLevelCompactionDynamicLevelBytes failed", t);
 		}
 		return this;
 	}
