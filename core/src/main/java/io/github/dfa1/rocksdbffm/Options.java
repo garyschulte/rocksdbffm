@@ -101,6 +101,8 @@ public final class Options extends NativeObject {
 	private static final MethodHandle MH_SET_MAX_TOTAL_WAL_SIZE;
 	/// `void rocksdb_options_set_level_compaction_dynamic_level_bytes(rocksdb_options_t*, unsigned char);`
 	private static final MethodHandle MH_SET_LEVEL_COMPACTION_DYNAMIC_LEVEL_BYTES;
+	/// `void rocksdb_options_set_max_write_buffer_size_to_maintain(rocksdb_options_t*, int64_t);`
+	private static final MethodHandle MH_SET_MAX_WRITE_BUFFER_SIZE_TO_MAINTAIN;
 	/// `void rocksdb_options_set_ratelimiter(rocksdb_options_t* opt, rocksdb_ratelimiter_t* limiter);`
 	private static final MethodHandle MH_SET_RATELIMITER;
 	/// `void rocksdb_options_set_env(rocksdb_options_t*, rocksdb_env_t*);`
@@ -236,6 +238,10 @@ public final class Options extends NativeObject {
 				"rocksdb_options_set_level_compaction_dynamic_level_bytes",
 				FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.JAVA_BYTE));
 
+		MH_SET_MAX_WRITE_BUFFER_SIZE_TO_MAINTAIN = NativeLibrary.lookup(
+				"rocksdb_options_set_max_write_buffer_size_to_maintain",
+				FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.JAVA_LONG));
+
 		MH_SET_RATELIMITER = NativeLibrary.lookup("rocksdb_options_set_ratelimiter",
 				FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
 
@@ -342,6 +348,28 @@ public final class Options extends NativeObject {
 			MH_SET_LEVEL_COMPACTION_DYNAMIC_LEVEL_BYTES.invokeExact(ptr(), value ? (byte) 1 : (byte) 0);
 		} catch (Throwable t) {
 			throw new RocksDBException("setLevelCompactionDynamicLevelBytes failed", t);
+		}
+		return this;
+	}
+
+	/// Sets the minimum amount of write buffer history to retain in memory for optimistic
+	/// transaction conflict detection.
+	///
+	/// When using [OptimisticTransactionDB], RocksDB must verify at commit time that the keys
+	/// written by the transaction have not been modified since the transaction began. This check
+	/// requires MemTable history going back to the transaction's start sequence number. If that
+	/// history has been flushed, the commit fails with "Transaction could not check for conflicts".
+	///
+	/// Setting this to at least the `write_buffer_size` ensures enough history is retained for
+	/// typical transaction lifetimes. Set to 0 (default) to disable.
+	///
+	/// @param sizeInBytes number of bytes of write buffer history to keep after flush
+	/// @return `this` for chaining
+	public Options setMaxWriteBufferSizeToMaintain(long sizeInBytes) {
+		try {
+			MH_SET_MAX_WRITE_BUFFER_SIZE_TO_MAINTAIN.invokeExact(ptr(), sizeInBytes);
+		} catch (Throwable t) {
+			throw new RocksDBException("setMaxWriteBufferSizeToMaintain failed", t);
 		}
 		return this;
 	}
