@@ -80,26 +80,31 @@
 				<groupId>org.junit.jupiter</groupId>
 				<artifactId>junit-jupiter</artifactId>
 				<version>6.0.3</version>
+				<scope>test</scope>
 			</dependency>
 			<dependency>
 				<groupId>org.assertj</groupId>
 				<artifactId>assertj-core</artifactId>
 				<version>3.27.7</version>
+				<scope>test</scope>
 			</dependency>
 			<dependency>
 				<groupId>org.openjdk.jmh</groupId>
 				<artifactId>jmh-core</artifactId>
 				<version>1.37</version>
+				<scope>test</scope>
 			</dependency>
 			<dependency>
 				<groupId>org.openjdk.jmh</groupId>
 				<artifactId>jmh-generator-annprocess</artifactId>
 				<version>1.37</version>
+				<scope>test</scope>
 			</dependency>
 			<dependency>
 				<groupId>net.jqwik</groupId>
 				<artifactId>jqwik</artifactId>
 				<version>1.9.3</version>
+				<scope>test</scope>
 			</dependency>
 		</dependencies>
 	</dependencyManagement>
