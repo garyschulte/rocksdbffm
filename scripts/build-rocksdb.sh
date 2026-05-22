@@ -91,18 +91,66 @@ fi
 # Compression codec setup
 #
 # Native macOS builds: inject the homebrew include path into CC/CXX so that
-# build_detect_platform's header probes succeed, then pre-generate
-# make_config.mk and patch -l<lib> references to the static .a paths.
-# Cross-compiled builds: keep compression disabled (no sysroot for target).
+# build_detect_platform's header probes succeed. The matching -L path is
+# passed via EXTRA_LDFLAGS so zig resolves -lsnappy/-llz4/-lzstd at link time.
+#
+# Native Linux builds: use pkg-config to locate include and lib paths.
+# Falls back to probing /usr/include and /usr/local/include directly if
+# pkg-config is absent or the packages are not registered with it.
+#
+# Cross-compiled builds: compression disabled (no cross-sysroot available).
 # ---------------------------------------------------------------------------
 PATCH_COMPRESSION=0
-HOMEBREW_PREFIX=""
+COMP_CFLAGS=""
+COMPRESSION_LDFLAGS=""
 
 if [ "$CLASSIFIER" = "$HOST_CLASSIFIER" ] && [ "$TARGET_OS" = "Darwin" ]; then
     HOMEBREW_PREFIX="$(brew --prefix 2>/dev/null || echo /opt/homebrew)"
     if [ -d "${HOMEBREW_PREFIX}/include" ]; then
         PATCH_COMPRESSION=1
-        echo "[build-rocksdb] Native macOS build — will statically link snappy/lz4/zstd from $HOMEBREW_PREFIX"
+        COMP_CFLAGS="-I${HOMEBREW_PREFIX}/include"
+        COMPRESSION_LDFLAGS="-L${HOMEBREW_PREFIX}/lib"
+        echo "[build-rocksdb] Native macOS build — snappy/lz4/zstd from $HOMEBREW_PREFIX"
+    fi
+
+elif [ "$CLASSIFIER" = "$HOST_CLASSIFIER" ] && [ "$TARGET_OS" = "Linux" ]; then
+    LINUX_INCLUDES=""
+    LINUX_LIBDIRS=""
+    # Resolve early: needed for both header probe and lib dir probe below.
+    ARCH_TRIPLET="$(gcc -dumpmachine 2>/dev/null || echo ${HOST_ARCH_NAME}-linux-gnu)"
+
+    # Prefer pkg-config; it handles multi-arch lib paths transparently.
+    if command -v pkg-config >/dev/null 2>&1; then
+        for pkg in liblz4 snappy libzstd; do
+            if pkg-config --exists "$pkg" 2>/dev/null; then
+                LINUX_INCLUDES="$LINUX_INCLUDES $(pkg-config --cflags-only-I "$pkg" 2>/dev/null)"
+                LINUX_LIBDIRS="$LINUX_LIBDIRS $(pkg-config --libs-only-L "$pkg" 2>/dev/null)"
+            fi
+        done
+    fi
+
+    # Fall back: probe standard and multiarch include paths for any libs pkg-config missed
+    # (or reported with no -I because they live in a default search path).
+    # On Debian/Ubuntu aarch64, lz4.h lives in /usr/include/aarch64-linux-gnu, not /usr/include.
+    # Use -isystem (not -I) so zig searches these AFTER its own libc++ headers;
+    # -I would prepend them and break zig's <cstdlib> → <stdlib.h> resolution.
+    for dir in /usr/include "/usr/include/${ARCH_TRIPLET}" /usr/local/include; do
+        if [ -f "$dir/lz4.h" ] || [ -f "$dir/snappy.h" ] || [ -f "$dir/zstd.h" ]; then
+            LINUX_INCLUDES="$LINUX_INCLUDES -isystem $dir"
+        fi
+    done
+
+    # Add common lib search paths so the linker finds the .so/.a files.
+    for dir in "/usr/lib/${ARCH_TRIPLET}" /usr/lib /usr/local/lib; do
+        [ -d "$dir" ] && LINUX_LIBDIRS="$LINUX_LIBDIRS -L$dir"
+    done
+
+    if [ -n "$LINUX_INCLUDES" ]; then
+        PATCH_COMPRESSION=1
+        # Deduplicate and trim whitespace
+        COMP_CFLAGS="$(echo "$LINUX_INCLUDES" | tr ' ' '\n' | sort -u | tr '\n' ' ' | xargs)"
+        COMPRESSION_LDFLAGS="$(echo "$LINUX_LIBDIRS" | tr ' ' '\n' | sort -u | tr '\n' ' ' | xargs)"
+        echo "[build-rocksdb] Native Linux build — snappy/lz4/zstd: includes='$COMP_CFLAGS' libs='$COMPRESSION_LDFLAGS'"
     fi
 fi
 
@@ -112,17 +160,15 @@ fi
 echo "[build-rocksdb] Building RocksDB $CLASSIFIER$CROSS with zig cc/c++ (jobs=$JOBS)..."
 
 if [ "$PATCH_COMPRESSION" = "1" ]; then
-    # Bake homebrew include path into the compiler so build_detect_platform's
-    # header probes succeed. The matching -L path is passed via EXTRA_LDFLAGS
-    # so zig can resolve -lsnappy/-llz4/-lzstd/-lgflags at link time.
-    export CC="zig cc -target $ZIG_TARGET -I${HOMEBREW_PREFIX}/include"
-    export CXX="zig c++ -target $ZIG_TARGET -I${HOMEBREW_PREFIX}/include"
-    COMPRESSION_LDFLAGS="-L${HOMEBREW_PREFIX}/lib"
+    # Bake the platform-specific include paths into the compiler so that
+    # build_detect_platform's header probes succeed for snappy/lz4/zstd.
+    # The matching -L paths are passed via EXTRA_LDFLAGS at link time.
+    export CC="zig cc -target $ZIG_TARGET $COMP_CFLAGS"
+    export CXX="zig c++ -target $ZIG_TARGET $COMP_CFLAGS"
 else
     export CC="zig cc -target $ZIG_TARGET"
     export CXX="zig c++ -target $ZIG_TARGET"
     export ROCKSDB_DISABLE_SNAPPY=1
-    COMPRESSION_LDFLAGS=""
 fi
 
 export PORTABLE=1
