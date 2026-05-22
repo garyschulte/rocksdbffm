@@ -93,6 +93,12 @@ public final class Options extends NativeObject {
 	private static final MethodHandle MH_SET_INFO_LOG_LEVEL;
 	/// `int rocksdb_options_get_info_log_level(rocksdb_options_t*);`
 	private static final MethodHandle MH_GET_INFO_LOG_LEVEL;
+	/// `void rocksdb_options_set_create_missing_column_families(rocksdb_options_t*, unsigned char);`
+	private static final MethodHandle MH_SET_CREATE_MISSING_COLUMN_FAMILIES;
+	/// `void rocksdb_options_set_max_open_files(rocksdb_options_t*, int);`
+	private static final MethodHandle MH_SET_MAX_OPEN_FILES;
+	/// `void rocksdb_options_set_max_total_wal_size(rocksdb_options_t* opt, uint64_t n);`
+	private static final MethodHandle MH_SET_MAX_TOTAL_WAL_SIZE;
 	/// `void rocksdb_options_set_ratelimiter(rocksdb_options_t* opt, rocksdb_ratelimiter_t* limiter);`
 	private static final MethodHandle MH_SET_RATELIMITER;
 	/// `void rocksdb_options_set_env(rocksdb_options_t*, rocksdb_env_t*);`
@@ -214,6 +220,16 @@ public final class Options extends NativeObject {
 		MH_GET_INFO_LOG_LEVEL = NativeLibrary.lookup("rocksdb_options_get_info_log_level",
 				FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS));
 
+		MH_SET_CREATE_MISSING_COLUMN_FAMILIES = NativeLibrary.lookup(
+				"rocksdb_options_set_create_missing_column_families",
+				FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.JAVA_BYTE));
+
+		MH_SET_MAX_OPEN_FILES = NativeLibrary.lookup("rocksdb_options_set_max_open_files",
+				FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
+
+		MH_SET_MAX_TOTAL_WAL_SIZE = NativeLibrary.lookup("rocksdb_options_set_max_total_wal_size",
+				FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.JAVA_LONG));
+
 		MH_SET_RATELIMITER = NativeLibrary.lookup("rocksdb_options_set_ratelimiter",
 				FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
 
@@ -263,6 +279,48 @@ public final class Options extends NativeObject {
 		} catch (Throwable t) {
 			throw new RocksDBException("getCreateIfMissing failed", t);
 		}
+	}
+
+	/// If true, missing column families are created automatically on open.
+	/// Default: false.
+	///
+	/// @param value `true` to auto-create missing column families
+	/// @return `this` for chaining
+	public Options setCreateMissingColumnFamilies(boolean value) {
+		try {
+			MH_SET_CREATE_MISSING_COLUMN_FAMILIES.invokeExact(ptr(), value ? (byte) 1 : (byte) 0);
+		} catch (Throwable t) {
+			throw new RocksDBException("setCreateMissingColumnFamilies failed", t);
+		}
+		return this;
+	}
+
+	/// Sets the maximum number of open files that can be used by the DB.
+	/// -1 means unlimited. Reducing this caps memory used by the file descriptor table.
+	///
+	/// @param maxOpenFiles maximum open files, or -1 for unlimited
+	/// @return `this` for chaining
+	public Options setMaxOpenFiles(int maxOpenFiles) {
+		try {
+			MH_SET_MAX_OPEN_FILES.invokeExact(ptr(), maxOpenFiles);
+		} catch (Throwable t) {
+			throw new RocksDBException("setMaxOpenFiles failed", t);
+		}
+		return this;
+	}
+
+	/// Sets the maximum total size of all WAL files before a flush is forced.
+	/// Capping this prevents unbounded memory growth in write-heavy workloads.
+	///
+	/// @param size maximum total WAL size in bytes
+	/// @return `this` for chaining
+	public Options setMaxTotalWalSize(long size) {
+		try {
+			MH_SET_MAX_TOTAL_WAL_SIZE.invokeExact(ptr(), size);
+		} catch (Throwable t) {
+			throw new RocksDBException("setMaxTotalWalSize failed", t);
+		}
+		return this;
 	}
 
 	/// Enables statistics gathering for this DB.
