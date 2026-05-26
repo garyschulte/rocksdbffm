@@ -5,7 +5,6 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
 
-// TODO: a lot of options are missing?
 /// FFM wrapper for `rocksdb_readoptions_t`.
 public final class ReadOptions extends NativeObject {
 
@@ -15,6 +14,8 @@ public final class ReadOptions extends NativeObject {
 	private static final MethodHandle MH_DESTROY;
 	/// `void rocksdb_readoptions_set_snapshot(rocksdb_readoptions_t*, const rocksdb_snapshot_t*);`
 	private static final MethodHandle MH_SET_SNAPSHOT;
+	/// `void rocksdb_readoptions_set_verify_checksums(rocksdb_readoptions_t*, unsigned char);`
+	private static final MethodHandle MH_SET_VERIFY_CHECKSUMS;
 
 	static {
 		MH_CREATE = NativeLibrary.lookup("rocksdb_readoptions_create",
@@ -25,6 +26,9 @@ public final class ReadOptions extends NativeObject {
 
 		MH_SET_SNAPSHOT = NativeLibrary.lookup("rocksdb_readoptions_set_snapshot",
 				FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+
+		MH_SET_VERIFY_CHECKSUMS = NativeLibrary.lookup("rocksdb_readoptions_set_verify_checksums",
+				FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.JAVA_BYTE));
 	}
 
 	private ReadOptions(MemorySegment ptr) {
@@ -55,6 +59,23 @@ public final class ReadOptions extends NativeObject {
 			return this;
 		} catch (Throwable t) {
 			throw new RocksDBException("readoptions setSnapshot failed", t);
+		}
+	}
+
+	/// Controls whether block checksums are verified on every read.
+	///
+	/// RocksDB defaults to `true`. For trusted storage environments where data integrity
+	/// is guaranteed by the underlying filesystem, setting this to `false` eliminates
+	/// per-block checksum CPU overhead and can meaningfully improve read throughput.
+	///
+	/// @param verify `false` to skip checksum verification on reads
+	/// @return `this` for chaining
+	public ReadOptions setVerifyChecksums(boolean verify) {
+		try {
+			MH_SET_VERIFY_CHECKSUMS.invokeExact(ptr(), verify ? (byte) 1 : (byte) 0);
+			return this;
+		} catch (Throwable t) {
+			throw new RocksDBException("readoptions setVerifyChecksums failed", t);
 		}
 	}
 

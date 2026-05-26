@@ -103,6 +103,12 @@ public final class Options extends NativeObject {
 	private static final MethodHandle MH_SET_LEVEL_COMPACTION_DYNAMIC_LEVEL_BYTES;
 	/// `void rocksdb_options_set_max_write_buffer_size_to_maintain(rocksdb_options_t*, int64_t);`
 	private static final MethodHandle MH_SET_MAX_WRITE_BUFFER_SIZE_TO_MAINTAIN;
+	/// `void rocksdb_options_set_log_file_time_to_roll(rocksdb_options_t*, size_t);`
+	private static final MethodHandle MH_SET_LOG_FILE_TIME_TO_ROLL;
+	/// `void rocksdb_options_set_keep_log_file_num(rocksdb_options_t*, size_t);`
+	private static final MethodHandle MH_SET_KEEP_LOG_FILE_NUM;
+	/// `void rocksdb_options_set_recycle_log_file_num(rocksdb_options_t*, size_t);`
+	private static final MethodHandle MH_SET_RECYCLE_LOG_FILE_NUM;
 	/// `void rocksdb_options_set_ratelimiter(rocksdb_options_t* opt, rocksdb_ratelimiter_t* limiter);`
 	private static final MethodHandle MH_SET_RATELIMITER;
 	/// `void rocksdb_options_set_env(rocksdb_options_t*, rocksdb_env_t*);`
@@ -242,6 +248,15 @@ public final class Options extends NativeObject {
 				"rocksdb_options_set_max_write_buffer_size_to_maintain",
 				FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.JAVA_LONG));
 
+		MH_SET_LOG_FILE_TIME_TO_ROLL = NativeLibrary.lookup("rocksdb_options_set_log_file_time_to_roll",
+				FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.JAVA_LONG));
+
+		MH_SET_KEEP_LOG_FILE_NUM = NativeLibrary.lookup("rocksdb_options_set_keep_log_file_num",
+				FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.JAVA_LONG));
+
+		MH_SET_RECYCLE_LOG_FILE_NUM = NativeLibrary.lookup("rocksdb_options_set_recycle_log_file_num",
+				FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.JAVA_LONG));
+
 		MH_SET_RATELIMITER = NativeLibrary.lookup("rocksdb_options_set_ratelimiter",
 				FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
 
@@ -370,6 +385,50 @@ public final class Options extends NativeObject {
 			MH_SET_MAX_WRITE_BUFFER_SIZE_TO_MAINTAIN.invokeExact(ptr(), sizeInBytes);
 		} catch (Throwable t) {
 			throw new RocksDBException("setMaxWriteBufferSizeToMaintain failed", t);
+		}
+		return this;
+	}
+
+	/// Sets how long (in seconds) before a RocksDB info log file is rolled to a new file.
+	/// Setting to 0 disables time-based rolling. Combined with [#setKeepLogFileNum] to
+	/// bound the total number of retained log files.
+	///
+	/// @param seconds roll interval in seconds; 0 to disable
+	/// @return `this` for chaining
+	public Options setLogFileTimeToRoll(long seconds) {
+		try {
+			MH_SET_LOG_FILE_TIME_TO_ROLL.invokeExact(ptr(), seconds);
+		} catch (Throwable t) {
+			throw new RocksDBException("setLogFileTimeToRoll failed", t);
+		}
+		return this;
+	}
+
+	/// Sets the maximum number of info log files to retain.
+	/// Older files are deleted once the limit is reached.
+	///
+	/// @param num maximum number of log files to keep
+	/// @return `this` for chaining
+	public Options setKeepLogFileNum(long num) {
+		try {
+			MH_SET_KEEP_LOG_FILE_NUM.invokeExact(ptr(), num);
+		} catch (Throwable t) {
+			throw new RocksDBException("setKeepLogFileNum failed", t);
+		}
+		return this;
+	}
+
+	/// Sets the number of WAL log files to recycle instead of deleting.
+	/// Recycled files are pre-allocated and reused for new WAL writes, reducing
+	/// `fallocate` syscall overhead on every new WAL segment.
+	///
+	/// @param num number of log files to recycle; 0 to disable
+	/// @return `this` for chaining
+	public Options setRecycleLogFileNum(long num) {
+		try {
+			MH_SET_RECYCLE_LOG_FILE_NUM.invokeExact(ptr(), num);
+		} catch (Throwable t) {
+			throw new RocksDBException("setRecycleLogFileNum failed", t);
 		}
 		return this;
 	}
