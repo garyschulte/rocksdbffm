@@ -115,6 +115,8 @@ public final class Options extends NativeObject {
 	private static final MethodHandle MH_SET_ENV;
 	/// `void rocksdb_options_set_sst_file_manager(rocksdb_options_t* opt, rocksdb_sst_file_manager_t* sfm);`
 	private static final MethodHandle MH_SET_SST_FILE_MANAGER;
+	/// `void rocksdb_options_set_max_background_jobs(rocksdb_options_t*, int);`
+	private static final MethodHandle MH_SET_MAX_BACKGROUND_JOBS;
 	static {
 		MH_CREATE = NativeLibrary.lookup("rocksdb_options_create",
 				FunctionDescriptor.of(ValueLayout.ADDRESS));
@@ -265,6 +267,9 @@ public final class Options extends NativeObject {
 
 		MH_SET_SST_FILE_MANAGER = NativeLibrary.lookup("rocksdb_options_set_sst_file_manager",
 				FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+
+		MH_SET_MAX_BACKGROUND_JOBS = NativeLibrary.lookup("rocksdb_options_set_max_background_jobs",
+				FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
 
 	}
 
@@ -911,6 +916,25 @@ public final class Options extends NativeObject {
 			return this;
 		} catch (Throwable t) {
 			throw new RocksDBException("setRateLimiter failed", t);
+		}
+	}
+
+	/// Sets the maximum number of concurrent background jobs (flushes + compactions combined).
+	///
+	/// This is the primary knob for background parallelism. The thread pool size set via
+	/// [Env#setBackgroundThreads] provides capacity; this option caps how many jobs actually run
+	/// concurrently. Setting it equal to the background thread count ensures all provisioned
+	/// threads are utilised. RocksDB default is 2, which under-utilises larger thread pools and
+	/// can cause write stalls under heavy multi-CF write load.
+	///
+	/// @param n maximum concurrent background jobs
+	/// @return `this` for chaining
+	public Options setMaxBackgroundJobs(int n) {
+		try {
+			MH_SET_MAX_BACKGROUND_JOBS.invokeExact(ptr(), n);
+			return this;
+		} catch (Throwable t) {
+			throw new RocksDBException("setMaxBackgroundJobs failed", t);
 		}
 	}
 
