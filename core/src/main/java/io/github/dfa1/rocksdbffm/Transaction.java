@@ -141,6 +141,66 @@ public final class Transaction extends NativeObject {
 				FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
 	}
 
+	/// Maximum key size that fits inline in the write slab's key buffer.
+	/// 32-byte Bonsai keys fit with room to spare; oversized keys fall back to a GC-managed alloc.
+	private static final int WRITE_SLAB_MAX_KEY = 128;
+
+	/// Initial capacity (bytes) for the write slab's growable value buffer.
+	/// Covers account info (~200 B), storage slots (32 B), and most trie branch nodes (~532 B).
+	private static final int WRITE_SLAB_INITIAL_VALUE_CAP = 4096;
+
+	/// Per-thread pre-allocated native buffers for the hot write path.
+	/// Eliminates per-put Arena allocation for keys ≤ 128 bytes and values ≤ current capacity.
+	private static final class WriteSlab {
+		/// 8-byte pointer slot reused as `char** errptr` on every call.
+		final MemorySegment errHolder;
+		/// Fixed-size buffer for inline key copies (avoids per-call native alloc for small keys).
+		final MemorySegment keyBuffer;
+		/// Growable buffer for value copies; doubled on overflow.
+		MemorySegment valueBuffer;
+		/// Current capacity of [#valueBuffer] in bytes.
+		long valueCap;
+
+		WriteSlab() {
+			Arena base = Arena.ofAuto();
+			errHolder = base.allocate(ValueLayout.ADDRESS);
+			errHolder.set(ValueLayout.ADDRESS, 0, MemorySegment.NULL);
+			keyBuffer = base.allocate(WRITE_SLAB_MAX_KEY);
+			valueCap = WRITE_SLAB_INITIAL_VALUE_CAP;
+			valueBuffer = Arena.ofAuto().allocate(WRITE_SLAB_INITIAL_VALUE_CAP);
+		}
+
+		/// Copies `key` into the slab's key buffer if it fits; otherwise allocates a GC-managed segment.
+		///
+		/// @param key source key bytes
+		/// @return native segment containing a copy of `key`
+		MemorySegment prepKey(byte[] key) {
+			if (key.length <= WRITE_SLAB_MAX_KEY) {
+				MemorySegment.copy(key, 0, keyBuffer, ValueLayout.JAVA_BYTE, 0, key.length);
+				return keyBuffer;
+			}
+			MemorySegment seg = Arena.ofAuto().allocate(key.length);
+			MemorySegment.copy(key, 0, seg, ValueLayout.JAVA_BYTE, 0, key.length);
+			return seg;
+		}
+
+		/// Copies `value` into the slab's value buffer, growing it if necessary.
+		///
+		/// @param value source value bytes
+		/// @return native segment containing a copy of `value`
+		MemorySegment prepValue(byte[] value) {
+			if (value.length > valueCap) {
+				long newCap = Math.max(value.length, valueCap * 2L);
+				valueBuffer = Arena.ofAuto().allocate(newCap);
+				valueCap = newCap;
+			}
+			MemorySegment.copy(value, 0, valueBuffer, ValueLayout.JAVA_BYTE, 0, value.length);
+			return valueBuffer;
+		}
+	}
+
+	private static final ThreadLocal<WriteSlab> WRITE_SLAB = ThreadLocal.withInitial(WriteSlab::new);
+
 	/// Package-private: created by TransactionDB.
 	Transaction(MemorySegment ptr) {
 		super(ptr);
@@ -150,31 +210,35 @@ public final class Transaction extends NativeObject {
 	// Write operations
 	// -----------------------------------------------------------------------
 
-	/// Stages a put inside this transaction. Slow path: allocates native memory for key/value.
+	/// Stages a put inside this transaction.
+	/// Uses thread-local slab buffers to avoid per-call native allocation on the hot path.
 	///
 	/// @param key   key bytes
 	/// @param value value bytes
 	public void put(byte[] key, byte[] value) {
-		try (Arena arena = Arena.ofConfined()) {
-			MemorySegment err = RocksDB.errHolder(arena);
-			MemorySegment k = RocksDB.toNative(arena, key);
-			MemorySegment v = RocksDB.toNative(arena, value);
-			MH_PUT.invokeExact(ptr(), k, (long) key.length, v, (long) value.length, err);
-			RocksDB.checkError(err);
+		try {
+			final WriteSlab slab = WRITE_SLAB.get();
+			slab.errHolder.set(ValueLayout.ADDRESS, 0, MemorySegment.NULL);
+			MH_PUT.invokeExact(ptr(),
+					slab.prepKey(key), (long) key.length,
+					slab.prepValue(value), (long) value.length,
+					slab.errHolder);
+			RocksDB.checkError(slab.errHolder);
 		} catch (Throwable t) {
 			throw RocksDBException.wrap("Native call failed", t);
 		}
 	}
 
-	/// Stages a delete inside this transaction. Slow path: allocates native memory for key.
+	/// Stages a delete inside this transaction.
+	/// Uses thread-local slab buffers to avoid per-call native allocation on the hot path.
 	///
 	/// @param key key bytes to delete
 	public void delete(byte[] key) {
-		try (Arena arena = Arena.ofConfined()) {
-			MemorySegment err = RocksDB.errHolder(arena);
-			MemorySegment k = RocksDB.toNative(arena, key);
-			MH_DELETE.invokeExact(ptr(), k, (long) key.length, err);
-			RocksDB.checkError(err);
+		try {
+			final WriteSlab slab = WRITE_SLAB.get();
+			slab.errHolder.set(ValueLayout.ADDRESS, 0, MemorySegment.NULL);
+			MH_DELETE.invokeExact(ptr(), slab.prepKey(key), (long) key.length, slab.errHolder);
+			RocksDB.checkError(slab.errHolder);
 		} catch (Throwable t) {
 			throw RocksDBException.wrap("Native call failed", t);
 		}
@@ -253,33 +317,39 @@ public final class Transaction extends NativeObject {
 	// Write operations — column family overloads
 	// -----------------------------------------------------------------------
 
-	/// Stages a put into `cf` inside this transaction. Slow path: allocates native memory.
+	/// Stages a put into `cf` inside this transaction.
+	/// Uses thread-local slab buffers to avoid per-call native allocation on the hot path.
 	///
 	/// @param cf    target column family
 	/// @param key   key bytes
 	/// @param value value bytes
 	public void put(ColumnFamilyHandle cf, byte[] key, byte[] value) {
-		try (Arena arena = Arena.ofConfined()) {
-			MemorySegment err = RocksDB.errHolder(arena);
+		try {
+			final WriteSlab slab = WRITE_SLAB.get();
+			slab.errHolder.set(ValueLayout.ADDRESS, 0, MemorySegment.NULL);
 			MH_PUT_CF.invokeExact(ptr(), cf.ptr(),
-					RocksDB.toNative(arena, key), (long) key.length,
-					RocksDB.toNative(arena, value), (long) value.length, err);
-			RocksDB.checkError(err);
+					slab.prepKey(key), (long) key.length,
+					slab.prepValue(value), (long) value.length,
+					slab.errHolder);
+			RocksDB.checkError(slab.errHolder);
 		} catch (Throwable t) {
 			throw RocksDBException.wrap("Native call failed", t);
 		}
 	}
 
-	/// Stages a delete of `key` from `cf` inside this transaction. Slow path.
+	/// Stages a delete of `key` from `cf` inside this transaction.
+	/// Uses thread-local slab buffers to avoid per-call native allocation on the hot path.
 	///
 	/// @param cf  target column family
 	/// @param key key bytes to delete
 	public void delete(ColumnFamilyHandle cf, byte[] key) {
-		try (Arena arena = Arena.ofConfined()) {
-			MemorySegment err = RocksDB.errHolder(arena);
+		try {
+			final WriteSlab slab = WRITE_SLAB.get();
+			slab.errHolder.set(ValueLayout.ADDRESS, 0, MemorySegment.NULL);
 			MH_DELETE_CF.invokeExact(ptr(), cf.ptr(),
-					RocksDB.toNative(arena, key), (long) key.length, err);
-			RocksDB.checkError(err);
+					slab.prepKey(key), (long) key.length,
+					slab.errHolder);
+			RocksDB.checkError(slab.errHolder);
 		} catch (Throwable t) {
 			throw RocksDBException.wrap("Native call failed", t);
 		}
@@ -424,10 +494,11 @@ public final class Transaction extends NativeObject {
 
 	/// Commits all staged operations in this transaction.
 	public void commit() {
-		try (Arena arena = Arena.ofConfined()) {
-			MemorySegment err = RocksDB.errHolder(arena);
-			MH_COMMIT.invokeExact(ptr(), err);
-			RocksDB.checkError(err);
+		try {
+			final WriteSlab slab = WRITE_SLAB.get();
+			slab.errHolder.set(ValueLayout.ADDRESS, 0, MemorySegment.NULL);
+			MH_COMMIT.invokeExact(ptr(), slab.errHolder);
+			RocksDB.checkError(slab.errHolder);
 		} catch (Throwable t) {
 			throw RocksDBException.wrap("Native call failed", t);
 		}
@@ -435,10 +506,11 @@ public final class Transaction extends NativeObject {
 
 	/// Rolls back all staged operations in this transaction.
 	public void rollback() {
-		try (Arena arena = Arena.ofConfined()) {
-			MemorySegment err = RocksDB.errHolder(arena);
-			MH_ROLLBACK.invokeExact(ptr(), err);
-			RocksDB.checkError(err);
+		try {
+			final WriteSlab slab = WRITE_SLAB.get();
+			slab.errHolder.set(ValueLayout.ADDRESS, 0, MemorySegment.NULL);
+			MH_ROLLBACK.invokeExact(ptr(), slab.errHolder);
+			RocksDB.checkError(slab.errHolder);
 		} catch (Throwable t) {
 			throw RocksDBException.wrap("Native call failed", t);
 		}
@@ -453,12 +525,13 @@ public final class Transaction extends NativeObject {
 		}
 	}
 
-	/// Rolls back to the most recent savepoint set by [#setSavePoint()].
+	/// Rolls back to the most recent savepoint set by [#rollbackToSavePoint()].
 	public void rollbackToSavePoint() {
-		try (Arena arena = Arena.ofConfined()) {
-			MemorySegment err = RocksDB.errHolder(arena);
-			MH_ROLLBACK_TO_SAVEPOINT.invokeExact(ptr(), err);
-			RocksDB.checkError(err);
+		try {
+			final WriteSlab slab = WRITE_SLAB.get();
+			slab.errHolder.set(ValueLayout.ADDRESS, 0, MemorySegment.NULL);
+			MH_ROLLBACK_TO_SAVEPOINT.invokeExact(ptr(), slab.errHolder);
+			RocksDB.checkError(slab.errHolder);
 		} catch (Throwable t) {
 			throw RocksDBException.wrap("Native call failed", t);
 		}
