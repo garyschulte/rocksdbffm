@@ -160,12 +160,13 @@ fi
 ARCH_CFLAGS=""
 case "$CLASSIFIER" in
     linux-aarch64)
-        # Force ARMv8.2-A+LSE atomic instructions (CASAL, LDAPR, STLR) to replace
-        # the LL/SC exclusive-pair mechanism. LLVM's zig cc cross-compilation can
-        # generate plain LDR for acquire loads instead of the required LDAR/LDAPR,
-        # causing write-group traversal corruption in RocksDB under concurrency.
-        # AWS Graviton 2+, GCP Tau T2A, and Azure Ampere Altra all support ARMv8.2+LSE.
-        ARCH_CFLAGS="-march=armv8.2-a+lse"
+        # Force LSE atomic instructions (CAS, SWP, LDADD) to replace the LL/SC
+        # exclusive-pair mechanism. Without +lse, LLVM can emit bare LDR for acquire
+        # loads instead of LDAR/STLR, causing write-group corruption under concurrency.
+        # -mcpu=generic+lse uses LLVM's CPU naming convention (zig 0.16+); the older
+        # GCC-style -march=armv8.2-a+lse is not recognised by zig's LLVM backend.
+        # Graviton 2+, GCP Tau T2A, and Ampere Altra all expose LSE.
+        ARCH_CFLAGS="-mcpu=generic+lse"
         ;;
 esac
 
