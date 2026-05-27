@@ -155,6 +155,21 @@ elif [ "$CLASSIFIER" = "$HOST_CLASSIFIER" ] && [ "$TARGET_OS" = "Linux" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Architecture-specific compiler flags
+# ---------------------------------------------------------------------------
+ARCH_CFLAGS=""
+case "$CLASSIFIER" in
+    linux-aarch64)
+        # Force ARMv8.2-A+LSE atomic instructions (CASAL, LDAPR, STLR) to replace
+        # the LL/SC exclusive-pair mechanism. LLVM's zig cc cross-compilation can
+        # generate plain LDR for acquire loads instead of the required LDAR/LDAPR,
+        # causing write-group traversal corruption in RocksDB under concurrency.
+        # AWS Graviton 2+, GCP Tau T2A, and Azure Ampere Altra all support ARMv8.2+LSE.
+        ARCH_CFLAGS="-march=armv8.2-a+lse"
+        ;;
+esac
+
+# ---------------------------------------------------------------------------
 # Build
 # ---------------------------------------------------------------------------
 echo "[build-rocksdb] Building RocksDB $CLASSIFIER$CROSS with zig cc/c++ (jobs=$JOBS)..."
@@ -163,11 +178,11 @@ if [ "$PATCH_COMPRESSION" = "1" ]; then
     # Bake the platform-specific include paths into the compiler so that
     # build_detect_platform's header probes succeed for snappy/lz4/zstd.
     # The matching -L paths are passed via EXTRA_LDFLAGS at link time.
-    export CC="zig cc -target $ZIG_TARGET $COMP_CFLAGS"
-    export CXX="zig c++ -target $ZIG_TARGET $COMP_CFLAGS"
+    export CC="zig cc -target $ZIG_TARGET $COMP_CFLAGS $ARCH_CFLAGS"
+    export CXX="zig c++ -target $ZIG_TARGET $COMP_CFLAGS $ARCH_CFLAGS"
 else
-    export CC="zig cc -target $ZIG_TARGET"
-    export CXX="zig c++ -target $ZIG_TARGET"
+    export CC="zig cc -target $ZIG_TARGET $ARCH_CFLAGS"
+    export CXX="zig c++ -target $ZIG_TARGET $ARCH_CFLAGS"
     export ROCKSDB_DISABLE_SNAPPY=1
 fi
 
