@@ -24,6 +24,8 @@ public final class FilterPolicy extends NativeObject {
 
 	/// `rocksdb_filterpolicy_t* rocksdb_filterpolicy_create_bloom(double bits_per_key);`
 	private static final MethodHandle MH_CREATE_BLOOM;
+	/// `rocksdb_filterpolicy_t* rocksdb_filterpolicy_create_bloom_full(double bits_per_key);`
+	private static final MethodHandle MH_CREATE_BLOOM_FULL;
 	/// `rocksdb_filterpolicy_t* rocksdb_filterpolicy_create_ribbon(double bloom_equivalent_bits_per_key);`
 	private static final MethodHandle MH_CREATE_RIBBON;
 	/// `void rocksdb_filterpolicy_destroy(rocksdb_filterpolicy_t*);`
@@ -31,6 +33,9 @@ public final class FilterPolicy extends NativeObject {
 
 	static {
 		MH_CREATE_BLOOM = NativeLibrary.lookup("rocksdb_filterpolicy_create_bloom",
+				FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.JAVA_DOUBLE));
+
+		MH_CREATE_BLOOM_FULL = NativeLibrary.lookup("rocksdb_filterpolicy_create_bloom_full",
 				FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.JAVA_DOUBLE));
 
 		MH_CREATE_RIBBON = NativeLibrary.lookup("rocksdb_filterpolicy_create_ribbon",
@@ -44,8 +49,24 @@ public final class FilterPolicy extends NativeObject {
 		super(ptr);
 	}
 
-	/// Creates a Bloom filter with the given number of bits per key.
+	/// Creates a **full** Bloom filter (one filter per SST file) with the given number of bits per key.
+	/// This is the preferred variant: it has fewer false positives than the block-based variant and
+	/// is what RocksDB recommends for new code.
 	/// Typical value: `10` (≈1% false-positive rate).
+	///
+	/// @param bitsPerKey number of bits per key (higher = lower false-positive rate)
+	/// @return a new [FilterPolicy]; caller must close it (or transfer ownership via [BlockBasedTableOptions#setFilterPolicy])
+	public static FilterPolicy newBloomFull(double bitsPerKey) {
+		try {
+			return new FilterPolicy((MemorySegment) MH_CREATE_BLOOM_FULL.invokeExact(bitsPerKey));
+		} catch (Throwable t) {
+			throw new RocksDBException("FilterPolicy.newBloomFull failed", t);
+		}
+	}
+
+	/// Creates a **block-based** Bloom filter (deprecated).
+	/// Prefer [#newBloomFull] for new code — this variant creates a separate filter per block
+	/// rather than one filter per SST file, which results in higher false-positive rates.
 	///
 	/// @param bitsPerKey number of bits per key (higher = lower false-positive rate)
 	/// @return a new [FilterPolicy]; caller must close it (or transfer ownership via [BlockBasedTableOptions#setFilterPolicy])
