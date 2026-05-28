@@ -1487,6 +1487,36 @@ public final class RocksDB {
 		}
 	}
 
+	/// Destroys a PinnableSlice pin obtained from [#openPinnedCf].
+	static void destroyPin(MemorySegment pin) {
+		try {
+			MH_PINNABLESLICE_DESTROY.invokeExact(pin);
+		} catch (Throwable t) {
+			throw RocksDBException.wrap("pinnableslice destroy failed", t);
+		}
+	}
+
+	/// Pin-only get with explicit column family. Returns a [PinnableSlice] whose data segment
+	/// is valid until [PinnableSlice#close] is called by the caller. Returns `null` if not found.
+	static PinnableSlice openPinnedCf(MemorySegment db, MemorySegment readOpts,
+	                                   ColumnFamilyHandle cf, byte[] key) {
+		try {
+			final MemorySegment k = nativeKey(key);
+			final ThreadSlab slab = CALL_SLAB.get();
+			slab.errHolder.set(ValueLayout.ADDRESS, 0, MemorySegment.NULL);
+			long len = (long) MH_GET_CF_OPEN_PIN.invokeExact(
+					db, readOpts, cf.ptr(), k, (long) key.length,
+					slab.pinHolder, slab.dataHolder, slab.errHolder);
+			checkError(slab.errHolder);
+			if (len == NOT_FOUND) return null;
+			MemorySegment pin = slab.pinHolder.get(ValueLayout.ADDRESS, 0);
+			MemorySegment data = slab.dataHolder.get(ValueLayout.ADDRESS, 0).reinterpret(len);
+			return new PinnableSlice(pin, data);
+		} catch (Throwable t) {
+			throw RocksDBException.wrap("get failed", t);
+		}
+	}
+
 	/// ByteBuffer get with explicit column family via PinnableSlice.
 	/// Returns actual value length, or -1 if not found.
 	static int getCfIntoBuffer(MemorySegment db, MemorySegment readOpts, ColumnFamilyHandle cf,

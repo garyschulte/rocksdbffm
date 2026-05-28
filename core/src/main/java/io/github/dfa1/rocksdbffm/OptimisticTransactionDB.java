@@ -291,6 +291,20 @@ public final class OptimisticTransactionDB extends NativeObject {
 		return Optional.ofNullable(RocksDB.withPinnedCf(baseDb, readOptions.ptr(), cf, key, reader));
 	}
 
+	/// Opens a pinned read of the value for `key` in `cf` and returns the raw [PinnableSlice].
+	///
+	/// The caller owns the returned slice and **must** close it (preferably via try-with-resources)
+	/// to release the block-cache pin. Holding the slice open prevents eviction of the pinned page.
+	///
+	/// @param cf          column family to read from
+	/// @param readOptions read options, e.g. containing a snapshot
+	/// @param key         key bytes to look up
+	/// @return the pinned slice, or [Optional#empty()] if the key does not exist
+	public Optional<PinnableSlice> getPinned(ColumnFamilyHandle cf, ReadOptions readOptions,
+	                                         byte[] key) {
+		return Optional.ofNullable(RocksDB.openPinnedCf(baseDb, readOptions.ptr(), cf, key));
+	}
+
 	/// Single-copy get from `cf` via PinnableSlice + direct output [ByteBuffer].
 	/// Returns the actual value length, or -1 if not found.
 	///

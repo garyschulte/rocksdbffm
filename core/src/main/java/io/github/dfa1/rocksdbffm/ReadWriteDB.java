@@ -595,6 +595,19 @@ public final class ReadWriteDB extends NativeObject {
 		return RocksDB.getCfBytes(ptr(), readOptions.ptr(), cf, key);
 	}
 
+	/// Open-pin get from `cf`: returns a [PinnableSlice] whose native data segment is valid until
+	/// the caller closes it. The caller owns the pin and must call [PinnableSlice#close] to release
+	/// the block-cache reference.
+	///
+	/// @param cf          target column family
+	/// @param readOptions read options (e.g. snapshot)
+	/// @param key         the key to look up
+	/// @return a live [PinnableSlice], or [Optional#empty()] if the key does not exist
+	public Optional<PinnableSlice> getPinned(ColumnFamilyHandle cf, ReadOptions readOptions,
+	                                         byte[] key) {
+		return Optional.ofNullable(RocksDB.openPinnedCf(ptr(), readOptions.ptr(), cf, key));
+	}
+
 	/// Scoped get from `cf` via PinnableSlice — invokes `reader` with a live view of the value bytes.
 	///
 	/// The [MemorySegment] passed to `reader` is valid only for the duration of the call; callers
