@@ -206,6 +206,22 @@ EXTRA_FLAGS="-Wno-error"
 rm -f make_config.mk
 make clean -j"$JOBS" 2>/dev/null || true
 
+# ---------------------------------------------------------------------------
+# Compile extras before make so the object can be injected into the link step.
+#
+# rocksdbffm_get_cf_into collapses the 3-downcall byte[] get path
+# (rocksdb_get_pinned_cf → rocksdb_pinnableslice_value → rocksdb_pinnableslice_destroy)
+# into a single C call, eliminating the Panama 3-vs-1 structural disadvantage.
+#
+# We inject the compiled object via EXTRA_LDFLAGS so make shared_lib picks it
+# up in its normal link step — no separate relinking pass required.
+# ---------------------------------------------------------------------------
+EXTRAS_SRC="$PROJECT_DIR/extras/rocksdbffm_extras.c"
+EXTRAS_OBJ="$ROCKSDB_DIR/rocksdbffm_extras.o"
+
+echo "[build-rocksdb] Compiling extras: $EXTRAS_SRC"
+$CC -fPIC -c "$EXTRAS_SRC" -I "$ROCKSDB_DIR/include" -Wno-error -o "$EXTRAS_OBJ"
+
 # OPTIMIZE_LEVEL uses ?= in the Makefile so a command-line assignment is the
 # correct override point — it cleanly replaces the default -O2 without any
 # flag-ordering ambiguity. EXTRA_CXXFLAGS is folded into CXXFLAGS before OPT,
@@ -213,7 +229,7 @@ make clean -j"$JOBS" 2>/dev/null || true
 make shared_lib \
     DEBUG_LEVEL=0 \
     OPTIMIZE_LEVEL=-O3 \
-    EXTRA_LDFLAGS="-s ${COMPRESSION_LDFLAGS}" \
+    EXTRA_LDFLAGS="-s ${COMPRESSION_LDFLAGS} $EXTRAS_OBJ" \
     EXTRA_CXXFLAGS="$EXTRA_FLAGS" \
     EXTRA_CFLAGS="$EXTRA_FLAGS" \
     -j"$JOBS"

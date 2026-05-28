@@ -40,10 +40,17 @@ public final class RocksDB {
 	/// Maximum key size that fits in the inline slab key buffer.
 	/// 32-byte Bonsai trie keys fit with room to spare; oversized keys fall back to a one-shot alloc.
 	private static final int SLAB_MAX_KEY = 128;
+	/// Pre-allocated value buffer size covering the vast majority of Bonsai trie-node reads
+	/// (branch nodes ≤ ~600 bytes, leaf nodes ≤ ~200 bytes, account state ≤ ~200 bytes).
+	/// Values larger than this are handled via a one-shot Arena allocation on the retry path.
+	private static final int SLAB_MAX_VAL = 4096;
+	/// Sentinel returned by rocksdbffm_get_cf_into when the key is not found.
+	/// SIZE_MAX in C == (size_t)-1; as a signed Java long this is -1L.
+	private static final long NOT_FOUND = -1L;
 
 	/// Pre-allocated segments shared within a single thread across calls.
 	/// errHolder is zeroed before each use; the C API writes at most one pointer into it.
-	/// valLenHolder is overwritten by every successful get.
+	/// valLenHolder is overwritten by every successful getCfBytes call (3-downcall path).
 	private static final class ThreadSlab {
 		/// 8-byte native segment reused as the `char** errptr` argument on every call.
 		final MemorySegment errHolder;
@@ -51,6 +58,8 @@ public final class RocksDB {
 		final MemorySegment valLenHolder;
 		/// Fixed-size native buffer for inline key copies (avoids per-call native alloc for small keys).
 		final MemorySegment keyBuffer;
+		/// Fixed-size native buffer for inline value copies via rocksdbffm_get_cf_into (1-downcall path).
+		final MemorySegment valBuffer;
 
 		ThreadSlab() {
 			// Arena.ofAuto() is GC-managed; lives as long as this slab object does (i.e. thread lifetime).
@@ -59,6 +68,7 @@ public final class RocksDB {
 			errHolder.set(ValueLayout.ADDRESS, 0, MemorySegment.NULL);
 			valLenHolder = arena.allocate(ValueLayout.JAVA_LONG);
 			keyBuffer = arena.allocate(SLAB_MAX_KEY);
+			valBuffer = arena.allocate(SLAB_MAX_VAL);
 		}
 	}
 
@@ -159,6 +169,8 @@ public final class RocksDB {
 	private static final MethodHandle MH_PUT_CF;
 	/// `rocksdb_pinnableslice_t* rocksdb_get_pinned_cf(rocksdb_t* db, const rocksdb_readoptions_t* options, rocksdb_column_family_handle_t* column_family, const char* key, size_t keylen, char** errptr);`
 	private static final MethodHandle MH_GET_PINNED_CF;
+	/// `size_t rocksdbffm_get_cf_into(rocksdb_t* db, const rocksdb_readoptions_t* options, rocksdb_column_family_handle_t* cf, const char* key, size_t keylen, char* outbuf, size_t outbuf_len, char** errptr);`
+	private static final MethodHandle MH_GET_CF_INTO;
 	/// `void rocksdb_delete_cf(rocksdb_t* db, const rocksdb_writeoptions_t* options, rocksdb_column_family_handle_t* column_family, const char* key, size_t keylen, char** errptr);`
 	private static final MethodHandle MH_DELETE_CF;
 	/// `unsigned char rocksdb_key_may_exist_cf(rocksdb_t* db, const rocksdb_readoptions_t* options, rocksdb_column_family_handle_t* column_family, const char* key, size_t key_len, char** value, size_t* val_len, const char* timestamp, size_t timestamp_len, unsigned char* value_found);`
@@ -367,6 +379,13 @@ public final class RocksDB {
 		MH_GET_PINNED_CF = NativeLibrary.lookup("rocksdb_get_pinned_cf",
 				FunctionDescriptor.of(ValueLayout.ADDRESS,
 						ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+						ValueLayout.ADDRESS, ValueLayout.JAVA_LONG,
+						ValueLayout.ADDRESS));
+
+		MH_GET_CF_INTO = NativeLibrary.lookup("rocksdbffm_get_cf_into",
+				FunctionDescriptor.of(ValueLayout.JAVA_LONG,
+						ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+						ValueLayout.ADDRESS, ValueLayout.JAVA_LONG,
 						ValueLayout.ADDRESS, ValueLayout.JAVA_LONG,
 						ValueLayout.ADDRESS));
 
@@ -1453,17 +1472,25 @@ public final class RocksDB {
 			final MemorySegment k = nativeKey(key);
 			final ThreadSlab slab = CALL_SLAB.get();
 			slab.errHolder.set(ValueLayout.ADDRESS, 0, MemorySegment.NULL);
-			MemorySegment pin = (MemorySegment) MH_GET_PINNED_CF.invokeExact(
-					db, readOpts, cf.ptr(), k, (long) key.length, slab.errHolder);
+			long len = (long) MH_GET_CF_INTO.invokeExact(
+					db, readOpts, cf.ptr(), k, (long) key.length,
+					slab.valBuffer, (long) SLAB_MAX_VAL, slab.errHolder);
 			checkError(slab.errHolder);
-			if (MemorySegment.NULL.equals(pin)) {
-				return null;
+			if (len == NOT_FOUND) return null;
+			if (len <= SLAB_MAX_VAL) {
+				return slab.valBuffer.asSlice(0, len).toArray(ValueLayout.JAVA_BYTE);
 			}
-			MemorySegment valPtr = (MemorySegment) MH_PINNABLESLICE_VALUE.invokeExact(pin, slab.valLenHolder);
-			long valLen = slab.valLenHolder.get(ValueLayout.JAVA_LONG, 0);
-			byte[] result = valPtr.reinterpret(valLen).toArray(ValueLayout.JAVA_BYTE);
-			MH_PINNABLESLICE_DESTROY.invokeExact(pin);
-			return result;
+			// Value larger than the slab: allocate a one-shot buffer and retry.
+			try (Arena arena = Arena.ofConfined()) {
+				MemorySegment big = arena.allocate(len);
+				slab.errHolder.set(ValueLayout.ADDRESS, 0, MemorySegment.NULL);
+				long len2 = (long) MH_GET_CF_INTO.invokeExact(
+						db, readOpts, cf.ptr(), k, (long) key.length,
+						big, len, slab.errHolder);
+				checkError(slab.errHolder);
+				if (len2 == NOT_FOUND || len2 > len) return null;
+				return big.asSlice(0, len2).toArray(ValueLayout.JAVA_BYTE);
+			}
 		} catch (Throwable t) {
 			throw RocksDBException.wrap("get failed", t);
 		}
