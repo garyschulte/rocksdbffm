@@ -206,8 +206,13 @@ EXTRA_FLAGS="-Wno-error"
 rm -f make_config.mk
 make clean -j"$JOBS" 2>/dev/null || true
 
+# OPTIMIZE_LEVEL uses ?= in the Makefile so a command-line assignment is the
+# correct override point — it cleanly replaces the default -O2 without any
+# flag-ordering ambiguity. EXTRA_CXXFLAGS is folded into CXXFLAGS before OPT,
+# so putting -O3 there would lose to the later -O2; this approach avoids that.
 make shared_lib \
     DEBUG_LEVEL=0 \
+    OPTIMIZE_LEVEL=-O3 \
     EXTRA_LDFLAGS="-s ${COMPRESSION_LDFLAGS}" \
     EXTRA_CXXFLAGS="$EXTRA_FLAGS" \
     EXTRA_CFLAGS="$EXTRA_FLAGS" \
